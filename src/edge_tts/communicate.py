@@ -4,6 +4,7 @@ end-users. The other classes and functions are for internal use only."""
 import asyncio
 import concurrent.futures
 import json
+import random
 import ssl
 import time
 import uuid
@@ -588,13 +589,32 @@ class Communicate:
                 async for message in self.__stream():
                     yield message
             except aiohttp.ClientResponseError as e:
-                if e.status != 403:
+                if e.status == 403:
+                    DRM.handle_client_response_error(e)
+                    self.state["chunk_audio_bytes"] = 0
+                    async for message in self.__stream():
+                        yield message
+                elif e.status == 429:
+                    # The msedgeservices endpoint rate-limits bursts of
+                    # handshakes, so back off and retry a few times.
+                    async for message in self.__stream_retry_429():
+                        yield message
+                else:
                     raise
 
-                DRM.handle_client_response_error(e)
-                self.state["chunk_audio_bytes"] = 0
+    async def __stream_retry_429(
+        self, attempts: int = 4, base_delay: float = 2.0
+    ) -> AsyncGenerator[TTSChunk, None]:
+        for attempt in range(attempts):
+            await asyncio.sleep(base_delay * (2**attempt) + random.uniform(0, 1))
+            self.state["chunk_audio_bytes"] = 0
+            try:
                 async for message in self.__stream():
                     yield message
+                return
+            except aiohttp.ClientResponseError as e:
+                if e.status != 429 or attempt == attempts - 1:
+                    raise
 
     async def save(
         self,
